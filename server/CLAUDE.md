@@ -50,4 +50,5 @@ relative imports **must** carry the `.js` suffix.
 - You're touching the indexer (pipeline, limits, rank, repo-map) → `src/modules/repo-intel/README.md`
 - You can't tell whether a test is unit or integration → `../TESTING.md`
 - You're starting a feature → `specs/` · you don't understand why something is the way it is → `INSIGHTS.md`
+- **You're starting any work here → `LEARNINGS.md` first** — what past sessions hit and how they got out
 - You need a deeper dive into a subsystem → `docs/`

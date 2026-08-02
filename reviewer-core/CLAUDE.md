@@ -42,4 +42,5 @@ no fs, no env, no clock. If a feature needs I/O, that I/O lives in the caller
 - You need the pipeline diagram or the public API → `README.md`
 - You're starting an engine change → `specs/`
 - You don't understand why an invariant is what it is, or what was already tried → `INSIGHTS.md`
+- **You're starting any work here → `LEARNINGS.md` first** — what past sessions hit and how they got out
 - You need a deeper dive → `docs/`

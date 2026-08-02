@@ -45,3 +45,4 @@ specifications — `run.ts` reads `*.flow.json` from there. Feature specs live i
 - You need the flow format, env knobs, or what's covered → `README.md`
 - You're adding a scenario for a new feature → `docs/specs/`
 - A flow behaves oddly and you're probably not the first to see it → `INSIGHTS.md`
+- **You're starting any work here → `LEARNINGS.md` first** — what past sessions hit and how they got out

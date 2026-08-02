@@ -36,4 +36,5 @@ Tests run on vitest + jsdom.
 - You need the route map and which endpoints each screen leans on → `README.md`
 - You're starting a screen or a feature → `specs/`
 - You can't tell why a component is shaped the way it is → `INSIGHTS.md`
+- **You're starting any work here → `LEARNINGS.md` first** — what past sessions hit and how they got out
 - You need a deeper dive → `docs/`
