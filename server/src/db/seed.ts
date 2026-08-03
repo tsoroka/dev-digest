@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { pathToFileURL } from 'node:url';
 import { createDb, type Db } from './client.js';
 import * as t from './schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -223,8 +224,11 @@ export async function seed(db: Db): Promise<{ workspaceId: string; userId: strin
   return { workspaceId, userId };
 }
 
-// CLI entrypoint
-if (import.meta.url === `file://${process.argv[1]}`) {
+// CLI entrypoint — pathToFileURL, not `file://${argv[1]}`: on win32 argv[1] is a
+// backslashed drive path, so the naive template never matches and `pnpm db:seed`
+// silently no-ops (exit 0, nothing seeded).
+const entry = process.argv[1];
+if (entry && import.meta.url === pathToFileURL(entry).href) {
   const url = process.env.DATABASE_URL;
   if (!url) {
     console.error('DATABASE_URL is required');
