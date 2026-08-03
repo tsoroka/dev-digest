@@ -208,6 +208,11 @@ d('A2 reviews + agents (Testcontainers pg)', () => {
     expect(run!.status).toBe('done');
     expect(run!.findingsCount).toBe(1);
     expect(run!.grounding).toBe('1/2 passed');
+    // The reviewer's cost survives the trip through run-executor → agent_runs →
+    // run_traces. MockLLMProvider bills 0.001 per call and the fixture is
+    // single-pass, so exactly one call is accumulated.
+    expect(run!.costUsd).toBe(0.001);
+    expect(trace.stats.cost_usd).toBe(0.001);
 
     await app.close();
   });

@@ -1,0 +1,18 @@
+{
+  "name": "Run cost badge shows on the PR list, the timeline row, and the trace drawer",
+  "description": "Covers all three L01 cost surfaces against the seeded agent_runs for PR #482: the PR list COST column shows the SUM over every run ($0.0013 + $0.0127 = $0.014), the newest timeline row shows its own tokens and cost, and that run's trace drawer shows the COST stat tile. The third seeded run uses an unpriced model and stores NULL, which is what keeps the total at $0.014 rather than counting it as 0. Read-only seeded data — nothing here triggers a model call. Assumes a freshly-seeded DB where acme/payments-api (PR #482) is the first repo — guaranteed by e2e-web.yml; run locally via the hermetic stack (see e2e/README.md). Asserts on values, never on the column header: the header row is uppercased via CSS, so its rendered text differs from the DOM text.",
+  "steps": [
+    { "cmd": ["open", "{BASE}/"], "label": "load the app root" },
+    { "cmd": ["wait", "--url", "/pulls"], "label": "land on the PR list" },
+    { "cmd": ["wait", "--load", "networkidle"], "label": "PR list data settles" },
+    { "cmd": ["wait", "--text", "$0.014"], "label": "COST column shows the summed cost of PR #482's runs" },
+    { "cmd": ["find", "text", "Add rate limiting to public API endpoints", "click"], "label": "open the PR row" },
+    { "cmd": ["wait", "--url", "/pulls/482"], "label": "navigate to the PR detail route" },
+    { "cmd": ["wait", "--load", "networkidle"], "label": "PR detail data settles" },
+    { "cmd": ["find", "role", "button", "click", "--name", "Agent runs"], "label": "switch to the Agent runs tab" },
+    { "cmd": ["wait", "--url", "tab=findings"], "label": "findings tab is active in the URL" },
+    { "cmd": ["wait", "--text", "9,119 tok · $0.0013"], "label": "newest timeline row shows its tokens and cost" },
+    { "cmd": ["find", "label", "Open run trace & logs", "click"], "label": "open the newest run's trace drawer" },
+    { "cmd": ["wait", "--text", "$0.0013"], "label": "trace drawer COST tile shows the run's cost" }
+  ]
+}

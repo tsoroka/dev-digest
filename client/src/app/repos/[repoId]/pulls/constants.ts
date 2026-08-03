@@ -23,8 +23,9 @@ export const SIZE_COLOR: Record<string, string> = {
   L: "var(--crit)",
 };
 
-/** Grid template for both the header row and PR rows. */
-export const GRID = "1fr 132px 92px 60px 118px 78px";
+/** Grid template for both the header row and PR rows. Must stay the same length
+    as COLUMN_KEYS — one track per column. */
+export const GRID = "1fr 132px 92px 60px 118px 72px 78px";
 
 /** Line-count thresholds for the S/M/L size bucket. */
 export const SIZE_SMALL_MAX = 100;
@@ -38,13 +39,15 @@ export const STATUS_FILTERS: { key: string; labelKey: string }[] = [
   { key: "stale", labelKey: "stale" },
 ];
 
-/** Column header i18n keys (under `list.columns`), in display order. */
+/** Column header i18n keys (under `list.columns`), in display order.
+    `updated` must stay LAST — the header right-aligns the final column by index. */
 export const COLUMN_KEYS: string[] = [
   "pullRequest",
   "author",
   "size",
   "score",
   "status",
+  "cost",
   "updated",
 ];
 

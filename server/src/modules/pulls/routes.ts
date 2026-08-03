@@ -117,6 +117,7 @@ export default async function pullsRoutes(appBase: FastifyInstance) {
     // not surfaced on the list — findings live on the PR detail page.)
     const prIds = rows.map((r) => r.id);
     const latestReviewByPr = new Map<string, { score: number | null }>();
+    const costByPr = new Map<string, number>();
     if (prIds.length > 0) {
       const reviewRows = await container.db
         .select({ prId: t.reviews.prId, score: t.reviews.score })
@@ -126,6 +127,22 @@ export default async function pullsRoutes(appBase: FastifyInstance) {
       // Rows are newest-first → first seen per PR is the latest review.
       for (const rv of reviewRows) {
         if (!latestReviewByPr.has(rv.prId)) latestReviewByPr.set(rv.prId, { score: rv.score });
+      }
+
+      // Total review COST per PR (L01 run-cost badge) — the SUM over every run,
+      // not just the latest. Same on-read shape as the score above: one IN-query
+      // + JS grouping, no FK denorm onto pull_requests. Runs whose model had no
+      // price carry NULL and are skipped, so a PR with zero priced runs never
+      // lands in the map and stays null below — the list renders "—" rather than
+      // a misleading $0.00.
+      const runRows = await container.db
+        .select({ prId: t.agentRuns.prId, costUsd: t.agentRuns.costUsd })
+        .from(t.agentRuns)
+        .where(and(inArray(t.agentRuns.prId, prIds), eq(t.agentRuns.workspaceId, workspaceId)));
+      for (const run of runRows) {
+        // prId is nullable (agent_runs.pr_id is ON DELETE SET NULL).
+        if (run.prId == null || run.costUsd == null) continue;
+        costByPr.set(run.prId, (costByPr.get(run.prId) ?? 0) + run.costUsd);
       }
     }
 
@@ -153,6 +170,7 @@ export default async function pullsRoutes(appBase: FastifyInstance) {
         opened_at: r.openedAt?.toISOString() ?? null,
         updated_at: r.updatedAt?.toISOString() ?? null,
         score: review ? review.score : null,
+        total_cost_usd: costByPr.get(r.id) ?? null,
       };
     });
   });
