@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { createDb, type Db } from './client.js';
 import * as t from './schema.js';
 import { eq, and } from 'drizzle-orm';
+import type { RunTrace } from '@devdigest/shared';
 import {
   GENERAL_REVIEWER_PROMPT,
   SECURITY_REVIEWER_PROMPT,
@@ -19,8 +20,10 @@ const DEFAULT_MODEL = 'deepseek/deepseek-v4-flash';
  *
  * Seeds: default workspace + system user + membership, default settings,
  * demo repo (acme/payments-api), PR #482 with files/commits, a sample review
- * with a few findings, and the three built-in agents (General + Security +
- * Performance), all on the default openrouter/deepseek-v4-flash provider+model.
+ * with a few findings, the three built-in agents (General + Security +
+ * Performance) on the default openrouter/deepseek-v4-flash provider+model, and
+ * three demo agent runs (+ their traces) so the run-cost surfaces have data
+ * without anyone spending a token — one of them deliberately unpriced.
  *
  * Course lessons populate the other tables (skills, conventions, memory, eval,
  * …) once their features are built — they start empty here.
@@ -219,6 +222,148 @@ export async function seed(db: Db): Promise<{ workspaceId: string; userId: strin
       .from(t.agents)
       .where(and(eq(t.agents.workspaceId, workspaceId), eq(t.agents.name, a.name)));
     if (!existing) await db.insert(t.agents).values(a);
+  }
+
+  // ---- demo agent runs for PR #482 (L01 run-cost badge) ----
+  // Lives here, not in the `if (!pr)` block above, because runs need the agent
+  // ids seeded just above. Guarded on "this PR has NO runs at all" so re-seeding
+  // is a no-op and a real run you triggered locally is never clobbered.
+  const existingRuns = await db.select().from(t.agentRuns).where(eq(t.agentRuns.prId, pr!.id));
+  if (existingRuns.length === 0) {
+    const agentRows = await db
+      .select()
+      .from(t.agents)
+      .where(eq(t.agents.workspaceId, workspaceId));
+    const agentByName = new Map(agentRows.map((a) => [a.name, a]));
+
+    // ranAt is explicit and staggered so the newest-first timeline order — and
+    // therefore the e2e flow's "first run row" — is deterministic.
+    const newest = Date.UTC(2026, 5, 1, 9, 14, 2); // 2026-06-01 09:14:02Z
+    const demoRuns: Array<{
+      agent: string;
+      model: string;
+      durationMs: number;
+      tokensIn: number;
+      tokensOut: number;
+      /** null = the model had no price; the run stores NULL and renders "—". */
+      costUsd: number | null;
+      score: number;
+      findings: number;
+      blockers: number;
+      grounding: string;
+      minutesAgo: number;
+    }> = [
+      {
+        agent: 'Security Reviewer',
+        model: DEFAULT_MODEL,
+        durationMs: 8200,
+        tokensIn: 8200,
+        tokensOut: 919,
+        costUsd: 0.0013,
+        score: 61,
+        findings: 2,
+        blockers: 1,
+        grounding: '2/2 passed',
+        minutesAgo: 0,
+      },
+      {
+        agent: 'General Reviewer',
+        model: DEFAULT_MODEL,
+        durationMs: 11400,
+        tokensIn: 11000,
+        tokensOut: 1500,
+        costUsd: 0.0127,
+        score: 78,
+        findings: 1,
+        blockers: 0,
+        grounding: '1/1 passed',
+        minutesAgo: 37,
+      },
+      {
+        // Unpriced model: neither OpenRouter's usage.cost nor the static PRICING
+        // table knows it, so the run stores NULL. Demonstrates the "—" state and
+        // proves null is SKIPPED by the PR total rather than counted as 0.
+        agent: 'Performance Reviewer',
+        model: 'qwen/qwen3-next-80b',
+        durationMs: 3900,
+        tokensIn: 3900,
+        tokensOut: 400,
+        costUsd: null,
+        score: 88,
+        findings: 0,
+        blockers: 0,
+        grounding: '0/0 passed',
+        minutesAgo: 73,
+      },
+    ];
+
+    for (const d of demoRuns) {
+      const agent = agentByName.get(d.agent);
+      if (!agent) continue;
+      const [run] = await db
+        .insert(t.agentRuns)
+        .values({
+          workspaceId,
+          agentId: agent.id,
+          prId: pr!.id,
+          ranAt: new Date(newest - d.minutesAgo * 60_000),
+          provider: agent.provider,
+          model: d.model,
+          durationMs: d.durationMs,
+          tokensIn: d.tokensIn,
+          tokensOut: d.tokensOut,
+          costUsd: d.costUsd,
+          status: 'done',
+          source: 'local',
+          findingsCount: d.findings,
+          grounding: d.grounding,
+          score: d.score,
+          blockers: d.blockers,
+        })
+        .returning();
+
+      const trace: RunTrace = {
+        config: {
+          agent: agent.name,
+          version: String(agent.version),
+          provider: agent.provider,
+          model: d.model,
+          pr: 482,
+          source: 'local',
+        },
+        stats: {
+          duration_ms: d.durationMs,
+          tokens_in: d.tokensIn,
+          tokens_out: d.tokensOut,
+          cost_usd: d.costUsd,
+          findings: d.findings,
+          grounding: d.grounding,
+        },
+        prompt_assembly: {
+          system: agent.systemPrompt,
+          user: 'Review the diff of PR #482 (rate limiting on public API endpoints).',
+        },
+        tool_calls: [],
+        raw_output: '{}',
+        memory_pulled: [],
+        specs_read: [],
+        log: [
+          { t: '00.00', kind: 'info', msg: `${agent.name} started` },
+          { t: '00.01', kind: 'result', msg: `Run complete — ${d.findings} finding(s)` },
+        ],
+      };
+      await db.insert(t.runTraces).values({ runId: run!.id, trace });
+
+      // Link the seeded review to the newest run so "jump to this run's
+      // findings" resolves on the timeline (the review's score is 61, which is
+      // why the Security run carries the same score).
+      if (d.agent === 'Security Reviewer') {
+        await db
+          .update(t.reviews)
+          .set({ runId: run!.id, agentId: agent.id })
+          .where(and(eq(t.reviews.prId, pr!.id), eq(t.reviews.kind, 'review')));
+      }
+    }
   }
 
   return { workspaceId, userId };

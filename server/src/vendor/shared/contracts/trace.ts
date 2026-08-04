@@ -62,6 +62,9 @@ export const RunStats = z.object({
   duration_ms: z.number().int(),
   tokens_in: z.number().int(),
   tokens_out: z.number().int(),
+  // USD cost of the run. null when the model had no price (unknown slug, cold
+  // PriceBook) or the run failed — the UI renders "—", never $0.00.
+  cost_usd: z.number().nullable(),
   findings: z.number().int(),
   grounding: z.string(),
 });
@@ -102,6 +105,9 @@ export const RunSummary = z.object({
   duration_ms: z.number().int().nullable(),
   tokens_in: z.number().int().nullable(),
   tokens_out: z.number().int().nullable(),
+  // USD cost of THIS run (not the PR total — see PrMeta.total_cost_usd).
+  // null when the model had no price or the run failed/was cancelled.
+  cost_usd: z.number().nullable(),
   findings_count: z.number().int().nullable(),
   grounding: z.string().nullable(),
   ran_at: z.string().nullable(),
