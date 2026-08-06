@@ -31,5 +31,5 @@ constant in `run.ts` plus comments; CI paths aren't hardcoded (`e2e-web.yml` fil
 instead. Renaming a directory that every contributor already has muscle memory for — and
 that shows up in review links, bookmarks, and any external references — costs more in
 practice than the naming inconsistency it fixes. **The trade-off we accepted:** `specs/`
-means feature specs in three packages and tests in the fourth, so `e2e/CLAUDE.md` carries
+means feature specs in three packages and tests in the fourth, so `e2e/AGENTS.md` carries
 an explicit "naming exception" note and the root layout rule flags e2e as the exception.
