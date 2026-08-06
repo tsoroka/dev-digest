@@ -49,7 +49,7 @@ Never rewrite or delete existing entries during a wrap-up. Append-only.
 Multi-module session: each lesson goes to the module it is **about**. Don't mirror
 one lesson into several files.
 
-## LEARNINGS.md vs INSIGHTS.md vs CLAUDE.md
+## LEARNINGS.md vs INSIGHTS.md vs AGENTS.md
 
 The repo already has two other homes for knowledge. Route deliberately:
 
@@ -57,7 +57,7 @@ The repo already has two other homes for knowledge. Route deliberately:
   tried → `INSIGHTS.md`, in that file's own `Context / Tried / Chose` format.
 - **Discovered behaviour** — what breaks, why, what to do instead → `LEARNINGS.md`.
 - **A lesson that hardened into a rule everyone must follow** → promote it to that
-  package's `CLAUDE.md` under "Conventions (non-default)", and drop it from
+  package's `AGENTS.md` under "Conventions (non-default)", and drop it from
   `LEARNINGS.md`. Don't leave it in both.
 
 ## The seven sections
@@ -104,7 +104,7 @@ padded one.
 3. **Not already there.** Read first. If a near-duplicate exists, extend that entry
    instead of adding a second one.
 4. **Not recoverable from the code.** If it would be obvious to anyone reading the
-   code, `README.md`, or `CLAUDE.md` — don't write it.
+   code, `README.md`, or `AGENTS.md` — don't write it.
 5. **Right file.** Not a decision-with-alternatives (that's `INSIGHTS.md`).
 
 Calibration:
@@ -124,6 +124,6 @@ Run these when asked, not as part of a wrap-up.
 - **Resolve conflicts explicitly.** One entry saying "always do X" and another saying
   "X fails here" means the next agent picks at random. Fix it rather than stacking.
 - **Split at scale.** Past ~200 entries in one file the signal drops; split by domain
-  (`LEARNINGS-Database.md`) and point at it from that package's `CLAUDE.md`.
+  (`LEARNINGS-Database.md`) and point at it from that package's `AGENTS.md`.
 - **It's a draft, not truth.** A wrap-up gets most of it right, but an LLM summary can
   be confidently wrong. These files are in git — a bad entry is one revert away.
