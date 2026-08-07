@@ -1,0 +1,161 @@
+{
+  "$comment": "Routing table for the pr-self-review skill. Read by scripts/pr-self-review-gate.mjs and referenced (never restated) by SKILL.md. Globs are repo-root-relative, POSIX separators.",
+
+  "packages": {
+    "client": "client/",
+    "server": "server/",
+    "reviewer-core": "reviewer-core/",
+    "e2e": "e2e/"
+  },
+
+  "excluded": [
+    "*/src/vendor/**",
+    "server/src/db/migrations/meta/**",
+    "**/pnpm-lock.yaml",
+    "**/package-lock.json"
+  ],
+
+  "lanes": [
+    {
+      "id": "frontend",
+      "title": "Frontend — Next.js / React",
+      "globs": [
+        "client/src/app/**",
+        "client/src/components/**",
+        "client/src/lib/**",
+        "client/src/i18n/**",
+        "client/messages/**",
+        "client/*.{ts,mjs,js}"
+      ],
+      "exclude": ["**/*.test.{ts,tsx}", "client/src/vendor/**", "client/src/test/**"],
+      "skills": ["frontend-architecture", "next-best-practices", "react-best-practices", "security", "typescript-expert"],
+      "docs": ["client/AGENTS.md", "client/LEARNINGS.md"],
+      "invariants": [
+        "A component never fetches on its own — new endpoint means a hook in src/lib/hooks/ called through src/lib/api.ts. A bare fetch in a component is stop-the-line.",
+        "No literal copy in JSX: everything through next-intl + messages/<locale>/*.json.",
+        "Pages stay thin; logic lives in src/app/**/_components/<Name>/.",
+        "The API base comes from NEXT_PUBLIC_API_BASE, never hardcoded.",
+        "Run progress arrives over SSE — don't add polling where a stream already exists."
+      ]
+    },
+    {
+      "id": "backend",
+      "title": "Backend — Fastify API",
+      "globs": [
+        "server/src/app.ts",
+        "server/src/server.ts",
+        "server/src/modules/**",
+        "server/src/platform/**",
+        "server/src/adapters/**",
+        "server/src/prompts/**"
+      ],
+      "exclude": ["**/*.test.ts", "server/src/vendor/**"],
+      "skills": ["fastify-best-practices", "zod", "security", "typescript-expert"],
+      "docs": ["server/AGENTS.md", "server/LEARNINGS.md"],
+      "invariants": [
+        "TypeScript ESM: relative imports must carry the .js suffix.",
+        "A new module is a plugin plus exactly one line in src/modules/index.ts — there is no autoload.",
+        "Routes declare zod params/body; never Schema.parse(req.body) inside the handler.",
+        "HTTP never reaches SQL: routes.ts -> service.ts -> repository.ts.",
+        "A new external dependency means an adapter plus a getter in platform/container.ts, or it can't be mocked via ContainerOverrides and tests hit the network.",
+        "Registration order in app.ts is load-bearing: plugins and the error handler come before modules."
+      ]
+    },
+    {
+      "id": "db",
+      "title": "Database — Drizzle schema and SQL migrations",
+      "globs": ["server/src/db/**", "server/drizzle.config.ts"],
+      "exclude": ["server/src/db/migrations/meta/**"],
+      "skills": ["drizzle-orm-patterns", "postgresql-table-design", "security"],
+      "docs": ["server/AGENTS.md", "server/LEARNINGS.md"],
+      "invariants": [
+        "Migrations do not run on boot; a schema change without a generated migration is a broken deploy.",
+        "A hand-edited migration that no longer matches src/db/schema/ will drift silently.",
+        "Secrets never live in the DB.",
+        "The schema already contains tables for future lessons — an unused table is expected, not dead code."
+      ]
+    },
+    {
+      "id": "engine",
+      "title": "Review engine — reviewer-core",
+      "globs": ["reviewer-core/src/**"],
+      "exclude": ["**/*.test.ts"],
+      "skills": ["typescript-expert", "zod", "security"],
+      "docs": ["reviewer-core/AGENTS.md", "reviewer-core/LEARNINGS.md"],
+      "invariants": [
+        "No side effects beyond the injected LLMProvider: no DB, GitHub, fs, env or clock. I/O belongs to the caller and arrives as a resolved string.",
+        "The public API is src/index.ts only — the server consumes TypeScript source through a path alias, so an export change breaks it instantly with no build step to catch it.",
+        "INJECTION_GUARD in prompt.ts is the one shared defense; never swap it for a keyword denylist.",
+        "All external content goes through wrapUntrusted.",
+        "Grounding is mandatory — a finding that doesn't cite a real diff line is dropped.",
+        "The score comes from findings that survived grounding; the model's self-reported score is ignored.",
+        "A new prompt section must be an optional slot: empty means the prompt is byte-identical to before."
+      ]
+    },
+    {
+      "id": "tests",
+      "title": "Tests — unit, integration, e2e flows",
+      "globs": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "server/test/**",
+        "client/src/test/**",
+        "reviewer-core/test/**",
+        "e2e/specs/**",
+        "e2e/run.ts",
+        "e2e/lib/**",
+        "e2e/agent-browser.json"
+      ],
+      "exclude": ["**/node_modules/**"],
+      "skills": ["react-testing-library", "typescript-expert"],
+      "docs": ["TESTING.md", "e2e/AGENTS.md"],
+      "invariants": [
+        "A DB-backed test must use the *.it.test.ts suffix — the unit lane excludes that glob and has no Docker.",
+        "Tests are hermetic by default: use server/src/adapters/mocks.ts, never real network or keys. Client tests mock fetch.",
+        "An e2e flow is JSON data, not code; the commands are the assertions. Deterministic locators only — never the AI chat command.",
+        "Coverage is typological, not line-based: one test per behaviour class, not per line."
+      ]
+    },
+    {
+      "id": "docs",
+      "title": "Documentation",
+      "globs": ["**/*.md", "*/specs/**", "*/docs/**", "docs/**"],
+      "exclude": [".claude/skills/**", "**/node_modules/**"],
+      "skills": ["mermaid-diagram"],
+      "docs": ["AGENTS.md", "INSIGHTS.md"],
+      "invariants": [
+        "Documentation is the source of truth; AGENTS.md points at it and never restates it.",
+        "Package conventions live in that package's AGENTS.md, never duplicated at the root.",
+        "Doc roles are fixed: README.md is how it works today, docs/ is deep dives, specs/ is what we're building, INSIGHTS.md is why (append-only, newest first, Context/Tried/Chose), LEARNINGS.md is hard-won gotchas (append-only, seven fixed section headings that are never renamed, reordered or added to).",
+        "CLAUDE.md is a symlink to AGENTS.md — never a second real file.",
+        "In e2e/, specs/ holds the flow tests; feature specs live in e2e/docs/specs/."
+      ]
+    },
+    {
+      "id": "infra",
+      "title": "Infrastructure — CI, scripts, containers, agent config",
+      "globs": [
+        ".github/workflows/**",
+        "scripts/**",
+        "docker-compose.yml",
+        ".gitignore",
+        ".claude/*.json",
+        ".claude/skills/*/SKILL.md",
+        ".claude/skills/pr-self-review/**",
+        "**/tsconfig.json",
+        "**/package.json",
+        "**/vitest.config.*"
+      ],
+      "exclude": ["**/node_modules/**"],
+      "skills": ["security", "typescript-expert"],
+      "docs": ["AGENTS.md", "LEARNINGS.md"],
+      "invariants": [
+        "Not a pnpm workspace: four standalone packages, each with its own package.json and lockfile. pnpm install runs inside the package directory, never at the root.",
+        "Cross-package code is shared through tsconfig path aliases against TypeScript source — no build step between packages.",
+        "CI is path-filtered per package; a new package path needs the matching workflow filter.",
+        "server/package.json is skip-worktree, so CI calls pnpm exec vitest directly rather than committed scripts.",
+        "scripts/e2e.sh runs on alternate ports (PG 5433, API 3101, web 3100) and must never touch the dev database."
+      ]
+    }
+  ]
+}
