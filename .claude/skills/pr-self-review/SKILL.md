@@ -114,14 +114,17 @@ guardrails and reviewed by nobody.
 Collect every lane's findings into one JSON array and pipe it in:
 
 ```bash
-node scripts/pr-self-review-gate.mjs ground < findings.json > .claude/pr-self-review/verdict.json
+node scripts/pr-self-review-gate.mjs ground < findings.json
 ```
 
-**Do not compute the gate yourself.** That one command applies the citation gate
-(the port of `reviewer-core/src/grounding.ts`), dedupes overlapping findings, merges
-the guardrails in, applies dismissals, scores with the `reduce.ts` penalty table, and
-picks the verdict under `failOn: 'critical'`. What it prints **is** `verdict.json` —
-write it verbatim, including `scope_hash`.
+It writes `.claude/pr-self-review/verdict.json` itself and echoes it to stdout.
+**Never redirect stdout into that path** — `>` truncates the file to zero bytes
+before the process starts, so a failed run would leave an unreadable verdict behind.
+
+**Do not compute the gate yourself.** That one command normalizes severities,
+applies the citation gate (the port of `reviewer-core/src/grounding.ts`), dedupes
+overlapping findings, merges the guardrails in, applies dismissals, scores with the
+`reduce.ts` penalty table, and picks the verdict under `failOn: 'critical'`.
 
 Same reason `reviewer-core` ignores the model's self-reported score: a blocking
 decision has to be reproducible. The same diff must produce the same verdict twice.
@@ -156,8 +159,16 @@ Print it in the product's own format — this is `composeBody()` in `to-review.t
 🔴 CRITICAL · 🟡 WARNING · 🔵 SUGGESTION. Close with the grounding line
 (`kept/total passed`) and the gate results.
 
-Always show two things people skip: what grounding dropped, and what a dismissal
-silenced. Both are how you find out the skill itself is drifting.
+Always show three things people skip, because each is how you find out the skill
+itself is drifting:
+
+1. **What grounding dropped** — `grounding.reasons`.
+2. **What a dismissal silenced** — `dismissed`.
+3. **What was rewritten** — any finding carrying `severity_normalized`. Report these
+   explicitly, and loudly when `unknown: true`. Coercing an unrecognised severity down
+   to WARNING is only safe *because* it is visible; unreported, a lane that fumbles one
+   severity string gets its blocking finding rendered as an ordinary warning and the PR
+   sails through. That is the exact failure normalization was added to prevent.
 
 On `request_changes`, say plainly: **the PR is blocked**, `gh pr create` will be
 denied, fix the criticals and re-run. Don't soften it. If a critical looks wrong, the

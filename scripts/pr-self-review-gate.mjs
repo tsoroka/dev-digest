@@ -856,6 +856,13 @@ function groundFindings(findings, scope) {
   return { kept, dropped };
 }
 
+/**
+ * The severity vocabulary, in one place. `SEV_RANK` and `SEVERITY_PENALTY` below
+ * are pure lookups derived from it — adding a row to either must never be what
+ * decides whether the gate accepts a new severity.
+ */
+const SEVERITIES = ['CRITICAL', 'WARNING', 'SUGGESTION'];
+
 /** Same file, overlapping range, same category → one finding, worst severity wins. */
 const SEV_RANK = { SUGGESTION: 1, WARNING: 2, CRITICAL: 3 };
 
@@ -927,12 +934,45 @@ function matchDismissal(finding, d) {
 const SEVERITY_PENALTY = { SUGGESTION: 97, WARNING: 88, CRITICAL: 65 };
 
 /**
+ * Coerce a model-supplied severity into the three the contract allows.
+ *
+ * The whole design says the model produces findings and the script decides what
+ * they mean — so the deciding step must not trust the string it was handed. An
+ * unrecognised severity used to fall through into its own bucket, leaving
+ * `counts.CRITICAL` at zero and turning a blocking finding into `verdict:
+ * comment`: a false ALLOW, the dangerous direction.
+ *
+ * Case is fixed first (SKILL.md's own report template prints severities
+ * lowercase, so that drift is expected). Anything still unknown becomes WARNING
+ * — visible and non-blocking. Coercing up would let a garbage string block a PR,
+ * which is how a gate earns a bypass.
+ */
+function normalizeSeverity(raw) {
+  const up = String(raw ?? '').trim().toUpperCase();
+  if (SEVERITIES.includes(up)) return { severity: up, changed: up !== raw };
+  return { severity: 'WARNING', changed: true, unknown: true };
+}
+
+function normalizeFinding(f) {
+  const { severity, changed, unknown } = normalizeSeverity(f.severity);
+  if (!changed) return f;
+  return {
+    ...f,
+    severity,
+    severity_normalized: { from: f.severity ?? null, to: severity, ...(unknown ? { unknown: true } : {}) },
+  };
+}
+
+/**
  * Verdict is deterministic from severities under `failOn: 'critical'` — the same
  * rule as `gateTriggered()` in reviewer-core/src/output/to-review.ts.
  */
 function summarize(kept) {
-  const counts = { CRITICAL: 0, WARNING: 0, SUGGESTION: 0 };
-  for (const f of kept) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+  // Fixed key set only: never let an incoming string introduce a bucket.
+  const counts = Object.fromEntries(SEVERITIES.map((s) => [s, 0]));
+  for (const f of kept) {
+    if (f.severity in counts) counts[f.severity] += 1;
+  }
   const worst = counts.CRITICAL ? 'CRITICAL' : counts.WARNING ? 'WARNING' : counts.SUGGESTION ? 'SUGGESTION' : null;
   return {
     counts,
@@ -994,8 +1034,47 @@ async function runHook() {
     );
   }
 
-  const verdict = JSON.parse(readFileSync(verdictPath, 'utf8'));
-  const scope = computeScope(root);
+  // A verdict that exists but cannot be read is the `missing` case, not an
+  // internal error — deny it. Letting this throw would hit the fail-open catch
+  // in main() and allow the command with no review at all.
+  let verdict;
+  try {
+    verdict = JSON.parse(readFileSync(verdictPath, 'utf8'));
+  } catch (e) {
+    deny(
+      `The PR Self Review verdict is unreadable (${e.message}).\n` +
+        'Re-run `/pr-self-review` to regenerate it, then retry.',
+    );
+  }
+  if (!verdict || typeof verdict !== 'object' || typeof verdict.scope_hash !== 'string') {
+    deny(
+      'The PR Self Review verdict is malformed — no `scope_hash`.\n' +
+        'Re-run `/pr-self-review` to regenerate it, then retry.',
+    );
+  }
+  // Validate the field the block decision actually reads. Anything unrecognised
+  // here used to fall through to allow() — the same "unknown means yes" pattern
+  // the severity normalization exists to remove.
+  if (!['approve', 'comment', 'request_changes'].includes(verdict.verdict)) {
+    deny(
+      `The PR Self Review verdict is malformed — unrecognised verdict '${verdict.verdict}'.\n` +
+        'Re-run `/pr-self-review` to regenerate it, then retry.',
+    );
+  }
+
+  // Same rule as the parse above, and the reason it must extend this far: the
+  // fail-open catch in main() is for a BROKEN GATE, not for a question the gate
+  // simply could not answer. computeScope() reads the hand-edited, git-tracked
+  // lanes.json — a conflict marker or trailing comma in it must deny, not allow.
+  let scope;
+  try {
+    scope = computeScope(root);
+  } catch (e) {
+    deny(
+      `The PR Self Review gate cannot compute the change set (${e.message}).\n` +
+        'Check `.claude/skills/pr-self-review/lanes.json` and the git state, then re-run `/pr-self-review`.',
+    );
+  }
 
   if (verdict.scope_hash !== scope.scope_hash) {
     deny(
@@ -1053,7 +1132,9 @@ async function main() {
       process.stderr.write(`ground: stdin is not valid JSON (${e.message})\n`);
       process.exit(2);
     }
-    const incoming = Array.isArray(input) ? input : (input.findings ?? []);
+    // Normalize before anything reads `severity` — grounding, dedupe and the
+    // verdict all key off it.
+    const incoming = (Array.isArray(input) ? input : (input.findings ?? [])).map(normalizeFinding);
     const withGuardrails = process.argv.includes('--no-guardrails')
       ? incoming
       : [...computeGuardrails(root, scope), ...incoming];
@@ -1075,40 +1156,55 @@ async function main() {
       else active.push(f);
     }
 
-    process.stdout.write(
-      JSON.stringify(
-        {
-          version: 1,
-          generated_at: new Date().toISOString(),
-          base: scope.base,
-          head: scope.head,
-          branch: scope.branch,
-          scope_hash: scope.scope_hash,
-          file_count: scope.file_count,
-          lanes: scope.lanes.map((l) => l.id),
-          ...summarize(active),
-          grounding: {
-            received: withGuardrails.length,
-            kept: kept.length,
-            dropped: dropped.length,
-            deduped: kept.length - deduped.length,
-            reasons: dropped.map((d) => ({
-              file: d.finding.file,
-              title: d.finding.title,
-              severity: d.finding.severity,
-              reason: d.reason,
-            })),
-          },
-          // Never silent: every run reports what was suppressed and why, and
-          // every dismissal that failed validation.
-          dismissed: silenced,
-          dismissals_malformed: malformed,
-          findings: active,
-        },
-        null,
-        2,
-      ),
-    );
+    const verdict = {
+      version: 1,
+      generated_at: new Date().toISOString(),
+      base: scope.base,
+      head: scope.head,
+      branch: scope.branch,
+      scope_hash: scope.scope_hash,
+      file_count: scope.file_count,
+      lanes: scope.lanes.map((l) => l.id),
+      ...summarize(active),
+      grounding: {
+        received: withGuardrails.length,
+        kept: kept.length,
+        dropped: dropped.length,
+        deduped: kept.length - deduped.length,
+        reasons: dropped.map((d) => ({
+          file: d.finding.file,
+          title: d.finding.title,
+          severity: d.finding.severity,
+          reason: d.reason,
+        })),
+      },
+      // Never silent: every run reports what was suppressed and why, and
+      // every dismissal that failed validation.
+      dismissed: silenced,
+      dismissals_malformed: malformed,
+      findings: active,
+    };
+
+    // Write the file HERE rather than letting the caller redirect stdout into
+    // it. `> verdict.json` truncates the target to zero bytes before this
+    // process starts, so any non-zero exit — bad stdin, a git failure, a crash —
+    // used to leave an unparseable verdict behind, which the hook then failed
+    // open on. Writing it ourselves also means the directory exists on a fresh
+    // clone, where the documented redirect used to fail outright.
+    //
+    // But ONLY for a real run. `--no-guardrails` strips every mechanical
+    // finding while still stamping a matching scope_hash, so writing it would
+    // hand the hook a fresh-looking verdict with the criticals removed — a
+    // debugging flag that launders a change past the gate. Testing prints to
+    // stdout and touches nothing.
+    if (process.argv.includes('--no-guardrails')) {
+      process.stderr.write('ground: --no-guardrails is a test mode; verdict.json was NOT written\n');
+    } else {
+      const out = path.join(root, VERDICT_REL);
+      mkdirSync(path.dirname(out), { recursive: true });
+      writeFileSync(out, JSON.stringify(verdict, null, 2) + '\n');
+    }
+    process.stdout.write(JSON.stringify(verdict, null, 2));
     return;
   }
 

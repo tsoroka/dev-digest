@@ -68,13 +68,10 @@ _Nothing yet._
 ### 2026-08-07 — Added the `pr-self-review` skill and its PreToolUse gate
 Built `scripts/pr-self-review-gate.mjs` (scope / guardrails / ground / dismiss / hook),
 the `.claude/skills/pr-self-review/` skill with `lanes.json` routing and a shared
-`reviewer-brief.md`, and the first project `.claude/settings.json`. The design line:
-lane subagents *produce* findings, the script *decides* what they mean — grounding,
-dedupe, scoring and the verdict are all deterministic, so the same diff blocks or
-passes identically twice. False positives are handled by `dismiss` (reason mandatory,
-`dismissed.json` tracked in git), never by `PR_SELF_REVIEW_BYPASS`. Guardrails, the
-grounding gate and the hook decision paths were verified against throwaway probe
-files; the full lane fan-out has not yet been exercised on a real branch.
+`reviewer-brief.md`, and the first project `.claude/settings.json`. Why the script and
+not the model decides → `INSIGHTS.md`. Then ran the skill on its own branch: the lanes
+found three CRITICALs in it, two of them fail-open holes in the gate itself, and it
+blocked its own PR until they were fixed.
 
 ## Open Questions
 
