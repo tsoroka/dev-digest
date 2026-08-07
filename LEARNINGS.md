@@ -39,21 +39,16 @@ you write will be evaluated against your own tool calls while you develop it.
 
 ## Codebase Patterns
 
-### 2026-08-07 — `server/src/db/**` is exempt from the `.js` import rule, and only it
-`server/AGENTS.md` states relative imports must carry `.js`. Measured across the
-server: 230 relative imports carry it, and all 56 that don't live in
-`server/src/db/schema/**` plus one file in `server/src/db/` — those are read by
-drizzle-kit's own bundler, not Node's ESM resolver. Any lint or guardrail on this rule
-must exclude `server/src/db/**` or it fires on every schema edit. `reviewer-core/src`
-has zero exceptions.
+### 2026-08-07 — Any guardrail on the `.js` import rule must exempt `server/src/db/**`
+The rule in `server/AGENTS.md` is not repo-wide in practice. Details and the
+measurement are in `server/LEARNINGS.md`; what matters at this level is that a lint or
+gate enforcing it fires on every schema edit unless that directory is excluded.
 
 ### 2026-08-07 — A new skill is inert until it appears in `pr-self-review/lanes.json`
 Skills otherwise only fire when the model happens to think they are relevant. The
 `pr-self-review` gate is what deterministically routes changed files to skills, so a
 skill that is not listed in a lane's `skills` array is never applied to a pre-PR
-review. `lanes.json` is also the only place the frontend/backend/db/engine/tests/docs/
-infra globs are defined — `SKILL.md` points at it and the gate script reads it, so
-adding a package or moving a directory is a one-file change.
+review.
 
 ## Tool & Library Notes
 

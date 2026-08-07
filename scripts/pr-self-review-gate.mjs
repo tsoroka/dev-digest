@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const VERDICT_REL = '.claude/pr-self-review/verdict.json';
 const DISMISSED_REL = '.claude/pr-self-review/dismissed.json';
@@ -25,12 +26,78 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 /**
  * Commands the hook refuses to run without a fresh, clean verdict.
  *
- * Anchored to a command boundary — start of line, or after `;`, `&&`, `||`, `|`,
- * `(` — with optional `VAR=value` prefixes. A bare /\bgh pr create\b/ also matches
- * the phrase quoted inside an `echo`, a commit message, or a test fixture, and
- * denying those is pure friction: mentioning the command is not running it.
+ * Anchored to a real command position: start of input, after a separator
+ * (`;` `&&` `||` `|` `(` `{` newline), or after a keyword that introduces one
+ * (`then` `do` `else` `eval` `time` `exec` `xargs` …), with optional
+ * `VAR=value` prefixes. A bare /\bgh pr create\b/ also matches the phrase
+ * quoted inside an `echo`, a commit message or a test fixture, and denying
+ * those is pure friction: mentioning a command is not running it.
  */
-const GUARDED = /(?:^|[;&|(\n])\s*(?:\w+=\S*\s+)*gh\s+pr\s+(?:create|ready|merge)\b/;
+const GUARDED =
+  /(?:^|[;&|(){}\n]|\b(?:then|do|else|eval|time|command|exec|nohup|xargs|sudo)\b)\s*(?:\w+=\S*\s+)*gh\s+pr\s+(?:create|ready|merge)\b/;
+
+/** A quoted string right after one of these is code about to be executed, not text. */
+const EXEC_TAIL = /(?:^|[;&|(){}\n]|\s)(?:(?:ba|z|k|d)?sh\s+-[a-zA-Z]*c|eval|xargs(?:\s+-[^\s]+)*)\s*$/;
+
+/**
+ * Reduce a shell command to the parts that are actually code.
+ *
+ * Two requirements pull in opposite directions: `echo "gh pr create"` must NOT
+ * be gated, and `bash -c "gh pr create"` MUST be. Both put the command inside
+ * quotes, so quoting alone cannot decide it — what decides it is whether a shell
+ * is about to execute that string. Quoted runs are therefore blanked out unless
+ * they follow an exec introducer, in which case their contents are spliced back
+ * in as live code. Heredoc bodies are always text.
+ */
+export function shellLiveText(command) {
+  const cmd = String(command ?? '');
+
+  // Drop heredoc bodies: `cat <<'EOF' … EOF` is data, and a line inside it that
+  // starts with the guarded command used to match on the newline boundary.
+  const lines = cmd.split('\n');
+  const kept = [];
+  let delim = null;
+  for (const line of lines) {
+    if (delim !== null) {
+      if (line.trim() === delim) delim = null;
+      continue;
+    }
+    const h = /<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/.exec(line);
+    kept.push(line);
+    if (h) delim = h[1];
+  }
+
+  let out = '';
+  const text = kept.join('\n');
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\\') {
+      out += ' ';
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      let end = i + 1;
+      while (end < text.length && text[end] !== ch) {
+        if (text[end] === '\\' && ch !== "'") end++;
+        end++;
+      }
+      const inner = text.slice(i + 1, Math.min(end, text.length));
+      // Backticks are always command substitution; other quotes only when a
+      // shell is being handed them.
+      out += ch === '`' || EXEC_TAIL.test(out) ? `;${inner};` : ' ';
+      i = end;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Does this command line actually invoke a guarded `gh pr` subcommand? */
+export function isGuardedCommand(command) {
+  return GUARDED.test(shellLiveText(command));
+}
 
 /**
  * Never reviewed, never hashed — build output, deps, our own run artifacts.
@@ -91,7 +158,7 @@ function resolveBase(root) {
 // globs — `**`, `*`, `?`, `{a,b}`; `/` is a hard boundary for a single `*`
 // ---------------------------------------------------------------------------
 
-function expandBraces(glob) {
+export function expandBraces(glob) {
   const open = glob.indexOf('{');
   if (open === -1) return [glob];
   let depth = 0;
@@ -121,7 +188,7 @@ function expandBraces(glob) {
   return parts.flatMap((p) => expandBraces(head + p + tail));
 }
 
-function globToRegex(glob) {
+export function globToRegex(glob) {
   let re = '^';
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
@@ -142,7 +209,7 @@ function globToRegex(glob) {
 }
 
 const regexCache = new Map();
-function matches(file, glob) {
+export function matches(file, glob) {
   let list = regexCache.get(glob);
   if (!list) {
     list = expandBraces(glob).map(globToRegex);
@@ -164,45 +231,65 @@ const isIgnored = (file) => matchesAny(file, IGNORED);
  * `buildLineIndex()` in reviewer-core/src/grounding.ts — it is what lets the
  * skill drop a finding that cites a line nobody changed.
  */
-function parseUnifiedDiff(text) {
+export function parseUnifiedDiff(text) {
   /** @type {Map<string, {ranges: number[][], added: {line: number, text: string}[], binary: boolean}>} */
   const files = new Map();
   let cur = null;
+  let inHunk = false;
   let newLine = 0;
 
+  const open = (file) => {
+    const entry = files.get(file) ?? { ranges: [], added: [], binary: false };
+    files.set(file, entry);
+    return entry;
+  };
+
   for (const raw of text.split('\n')) {
+    // `diff --git a/x b/y` always precedes a file, including binary ones and
+    // renames, which emit no `+++` at all. Taking the path from HERE rather than
+    // from `+++` is what makes binary detection reachable.
     if (raw.startsWith('diff --git ')) {
-      cur = null;
+      inHunk = false;
+      const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(raw);
+      cur = m ? open(m[2]) : null;
       continue;
     }
-    if (raw.startsWith('+++ ')) {
-      const p = raw.slice(4).trim();
-      if (p === '/dev/null') {
-        cur = null;
+
+    // Header lines are only headers BEFORE the first hunk. Inside a hunk they
+    // are content: an added line reading `++ b/foo` renders as `+++ b/foo` and
+    // used to be mistaken for a file header, silently reattributing every later
+    // hunk to a phantom path.
+    if (!inHunk) {
+      if (raw.startsWith('+++ ')) {
+        const p = raw.slice(4).trim();
+        cur = p === '/dev/null' ? null : open(p.startsWith('b/') ? p.slice(2) : p);
         continue;
       }
-      const file = p.startsWith('b/') ? p.slice(2) : p;
-      cur = files.get(file) ?? { ranges: [], added: [], binary: false };
-      files.set(file, cur);
-      continue;
+      if (raw.startsWith('--- ')) continue;
+      if (raw.startsWith('Binary files ') || raw.startsWith('GIT binary patch')) {
+        if (cur) cur.binary = true;
+        continue;
+      }
     }
-    if (raw.startsWith('Binary files ') && cur) {
-      cur.binary = true;
-      continue;
-    }
+
     if (raw.startsWith('@@')) {
-      const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(raw);
+      const m = /^@@+ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(raw);
       if (!m || !cur) continue;
+      inHunk = true;
       const start = Number(m[1]);
       const count = m[2] === undefined ? 1 : Number(m[2]);
       if (count > 0) cur.ranges.push([start, start + count - 1]);
       newLine = start;
       continue;
     }
-    if (!cur) continue;
+
+    if (!inHunk || !cur) continue;
+    if (raw.startsWith('\\')) continue; // "\ No newline at end of file"
     if (raw.startsWith('+')) {
       cur.added.push({ line: newLine, text: raw.slice(1) });
       newLine++;
+    } else if (!raw.startsWith('-')) {
+      newLine++; // context line (only appears with -U>0, but keep the counter honest)
     }
   }
   return files;
@@ -242,7 +329,13 @@ function computeScope(root) {
     .trim();
   const head = (git(['rev-parse', 'HEAD'], { cwd: root, allowFail: true }) ?? '').trim();
 
-  const diffText = git(['diff', '-U0', '--no-color', base], { cwd: root, allowFail: true }) ?? '';
+  // `--no-renames` must match the --name-status call below. Without it git
+  // reports a rename as `similarity index / rename from / rename to` with no
+  // hunks at all, while --name-status reports `D old` + `A new` — so the new
+  // path arrived with an empty changed-line range and nothing, not even a
+  // guardrail finding anchored on it, could be grounded against it.
+  const diffText =
+    git(['diff', '-U0', '--no-color', '--no-renames', base], { cwd: root, allowFail: true }) ?? '';
   const statusText =
     git(['diff', '--name-status', '--no-renames', base], { cwd: root, allowFail: true }) ?? '';
   const untrackedText =
@@ -328,6 +421,10 @@ function computeScope(root) {
     files,
     lanes: lanesCfg.lanes.filter((l) => active.has(l.id)),
     packages: [...pkgs].sort(),
+    // Changed, not excluded, and matched by no lane — so no reviewer will ever
+    // see it. Silently reviewing nothing is the one failure a review tool must
+    // not have, so this is surfaced rather than left to be noticed.
+    unrouted: files.filter((f) => !f.excluded && f.lanes.length === 0).map((f) => f.path),
     _diff: parsed,
     _untracked: untracked,
   };
@@ -377,7 +474,7 @@ function baseText(root, base, p) {
 }
 
 /** Names a module exports — `export { a, b as c }`, `export const d`, `export type E`. */
-function exportedNames(src) {
+export function exportedNames(src) {
   const names = new Set();
   for (const m of src.matchAll(/export\s*\{([^}]*)\}/g)) {
     for (const raw of m[1].split(',')) {
@@ -397,7 +494,7 @@ function exportedNames(src) {
 }
 
 /** Resolve a dotted next-intl key inside a namespace object. */
-function hasMessageKey(obj, key) {
+export function hasMessageKey(obj, key) {
   let cur = obj;
   for (const seg of key.split('.')) {
     if (cur === null || typeof cur !== 'object' || !(seg in cur)) return false;
@@ -813,7 +910,7 @@ function computeGuardrails(root, scope) {
  */
 const FULL_FILE_KINDS = new Set(['secret_leak', 'lethal_trifecta', 'phantom', 'hook']);
 
-function inRanges(ranges, start, end) {
+export function inRanges(ranges, start, end) {
   const lo = Math.min(start, end);
   const hi = Math.max(start, end);
   return ranges.some(([a, b]) => lo <= b && hi >= a);
@@ -825,7 +922,7 @@ function inRanges(ranges, start, end) {
  * model that produced the findings — the same reason reviewer-core ignores the
  * model's self-reported score.
  */
-function groundFindings(findings, scope) {
+export function groundFindings(findings, scope) {
   const byPath = new Map(scope.files.map((f) => [f.path, f]));
   const kept = [];
   const dropped = [];
@@ -861,12 +958,12 @@ function groundFindings(findings, scope) {
  * are pure lookups derived from it — adding a row to either must never be what
  * decides whether the gate accepts a new severity.
  */
-const SEVERITIES = ['CRITICAL', 'WARNING', 'SUGGESTION'];
+export const SEVERITIES = ['CRITICAL', 'WARNING', 'SUGGESTION'];
 
 /** Same file, overlapping range, same category → one finding, worst severity wins. */
 const SEV_RANK = { SUGGESTION: 1, WARNING: 2, CRITICAL: 3 };
 
-function dedupe(findings) {
+export function dedupe(findings) {
   const out = [];
   for (const f of findings) {
     const hit = out.find(
@@ -947,13 +1044,13 @@ const SEVERITY_PENALTY = { SUGGESTION: 97, WARNING: 88, CRITICAL: 65 };
  * — visible and non-blocking. Coercing up would let a garbage string block a PR,
  * which is how a gate earns a bypass.
  */
-function normalizeSeverity(raw) {
+export function normalizeSeverity(raw) {
   const up = String(raw ?? '').trim().toUpperCase();
   if (SEVERITIES.includes(up)) return { severity: up, changed: up !== raw };
   return { severity: 'WARNING', changed: true, unknown: true };
 }
 
-function normalizeFinding(f) {
+export function normalizeFinding(f) {
   const { severity, changed, unknown } = normalizeSeverity(f.severity);
   if (!changed) return f;
   return {
@@ -967,7 +1064,7 @@ function normalizeFinding(f) {
  * Verdict is deterministic from severities under `failOn: 'critical'` — the same
  * rule as `gateTriggered()` in reviewer-core/src/output/to-review.ts.
  */
-function summarize(kept) {
+export function summarize(kept) {
   // Fixed key set only: never let an incoming string introduce a bucket.
   const counts = Object.fromEntries(SEVERITIES.map((s) => [s, 0]));
   for (const f of kept) {
@@ -1020,8 +1117,7 @@ async function runHook() {
   }
 
   if (input?.tool_name !== 'Bash') allow();
-  const command = String(input?.tool_input?.command ?? '');
-  if (!GUARDED.test(command)) allow();
+  if (!isGuardedCommand(input?.tool_input?.command)) allow();
   if (process.env.PR_SELF_REVIEW_BYPASS === '1') allow();
 
   const root = repoRoot();
@@ -1265,7 +1361,13 @@ async function main() {
   process.exit(2);
 }
 
-main().catch((err) => {
+// Only run as a CLI. The pure helpers above are exported so
+// `pr-self-review-gate.test.mjs` can pin them without spawning a process.
+const invokedDirectly =
+  process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+
+if (invokedDirectly)
+  main().catch((err) => {
   // Fail OPEN. A broken gate must never brick the Bash tool — it fails closed
   // only on the three real answers above (missing / stale / blocked verdict).
   if (process.argv[2] === 'hook') process.exit(0);

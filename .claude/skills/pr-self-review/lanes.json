@@ -120,7 +120,8 @@
       "id": "docs",
       "title": "Documentation",
       "globs": ["**/*.md", "*/specs/**", "*/docs/**", "docs/**"],
-      "exclude": [".claude/skills/**", "**/node_modules/**"],
+      "$comment-exclude": "Per-skill content is vendored (~1400 files); the catalog README at .claude/skills/README.md is ours and stays in this lane.",
+      "exclude": [".claude/skills/*/**", "**/node_modules/**"],
       "skills": ["mermaid-diagram"],
       "docs": ["AGENTS.md", "INSIGHTS.md"],
       "invariants": [
@@ -135,16 +136,19 @@
       "id": "infra",
       "title": "Infrastructure — CI, scripts, containers, agent config",
       "globs": [
-        ".github/workflows/**",
+        ".github/**",
         "scripts/**",
-        "docker-compose.yml",
+        "docker-compose*.yml",
+        "Dockerfile*",
         ".gitignore",
+        ".gitattributes",
         ".claude/*.json",
         ".claude/skills/*/SKILL.md",
         ".claude/skills/pr-self-review/**",
-        "**/tsconfig.json",
+        "**/tsconfig*.json",
         "**/package.json",
-        "**/vitest.config.*"
+        "**/vitest.config.*",
+        "**/*.mjs"
       ],
       "exclude": ["**/node_modules/**"],
       "skills": ["security", "typescript-expert"],

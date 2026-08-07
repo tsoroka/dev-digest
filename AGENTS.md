@@ -22,7 +22,8 @@ hits the server immediately, with no build step in between.
 - From zero: `./scripts/dev.sh` — Docker Postgres + `.env` + deps + migrations + seed + both servers
 - DB only: `./scripts/dev.sh --db-only` · skip seed: `--no-seed` · skip web: `--no-client`
 - Migrations are **not** applied on boot: `cd server && pnpm db:migrate`
-- Before opening a PR: `/pr-self-review` — a CRITICAL finding blocks `gh pr create`
+- Before opening a PR: `/pr-self-review` — a hook gates `gh pr create|ready|merge`
+  on a fresh, non-blocking verdict (`.claude/skills/pr-self-review/SKILL.md`)
 
 ## Repo conventions
 

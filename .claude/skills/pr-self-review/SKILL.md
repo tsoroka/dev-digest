@@ -60,6 +60,12 @@ Stop early, writing nothing, when:
 - `file_count` is 0 — say there's nothing to review.
 - `branch` is `main` — there is no PR to open. Say so.
 
+`scope` also returns **`unrouted`**: changed files that matched no lane and are not
+excluded, so nobody will review them. Report that list in step 6, every time it is
+non-empty. A review tool that silently reviews nothing is the one failure mode it
+must not have — and if a path keeps showing up there, the fix is a glob in
+`lanes.json`, not a shrug.
+
 ### 2. Guardrails
 
 ```bash
@@ -159,9 +165,9 @@ Print it in the product's own format — this is `composeBody()` in `to-review.t
 🔴 CRITICAL · 🟡 WARNING · 🔵 SUGGESTION. Close with the grounding line
 (`kept/total passed`) and the gate results.
 
-Always show three things people skip, because each is how you find out the skill
-itself is drifting:
+Always show these, because each is how you find out the skill itself is drifting:
 
+0. **What nobody reviewed** — `unrouted` from step 1, whenever it is non-empty.
 1. **What grounding dropped** — `grounding.reasons`.
 2. **What a dismissal silenced** — `dismissed`.
 3. **What was rewritten** — any finding carrying `severity_normalized`. Report these
@@ -235,6 +241,17 @@ SUGGESTION. WARNING is the middle: real, worth fixing, not worth blocking on.
 `request_changes`. The gate fails **open** on any internal error — a broken script
 must never brick the Bash tool. `git push` is deliberately not gated; pushing a WIP
 branch is normal work.
+
+## Tests
+
+```bash
+node --test scripts/pr-self-review-gate.test.mjs
+```
+
+Node's built-in runner — no dependency, no fifth package. **Run it after any change
+to the gate script.** The cases marked `REGRESSION` are bugs that actually shipped:
+every one was found by reviewing this gate, and two of them were introduced by fixing
+the others. Add a case when you fix the next one.
 
 ## Read when
 
