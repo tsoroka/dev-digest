@@ -23,3 +23,9 @@ test-results/
 
 # emdash worktree config (local)
 .emdash.json
+
+# pr-self-review run artifacts — local, per-worktree. dismissed.json in the same
+# directory is deliberately NOT ignored: a silenced finding should be visible to
+# whoever reviews the PR.
+.claude/pr-self-review/verdict.json
+.claude/pr-self-review/report.md

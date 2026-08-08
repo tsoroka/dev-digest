@@ -48,6 +48,14 @@ Verify with `head -c 60 <file> | od -c` before trusting the diff.
 
 ## Codebase Patterns
 
+### 2026-08-07 — `src/db/**` is exempt from the `.js` import rule, and only it
+`AGENTS.md` says relative imports must carry the `.js` suffix. Measured across
+`server/src`: 230 relative imports carry it, and all 56 that don't are in
+`src/db/schema/**` plus one file in `src/db/`. Those files are read by drizzle-kit's own
+bundler, not by Node's ESM resolver, so the rule genuinely does not apply to them —
+don't "fix" a schema file by adding `.js`, and exclude `src/db/**` from any lint or
+gate enforcing the rule. `reviewer-core/src` has zero exceptions.
+
 ### 2026-08-02 — Editing a contract in `src/vendor/shared/` fails at RUNTIME, not compile time
 `server/src/vendor/shared/` and `client/src/vendor/shared/` are two hand-maintained copies
 of the same Zod contracts (each package aliases `@devdigest/shared` to its own). Nothing
