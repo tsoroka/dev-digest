@@ -37,11 +37,21 @@ in that function**: `$(…)` inside double quotes, `<<<` misread as a heredoc, a
 `<<` swallowing the rest of the command, `/bin/sh -c`, `bash --norc -c`. Each fix
 revealed the next case; the tests written to pin the previous round passed vacuously.
 
-`GUARDED` is now `/gh\s+pr\s+(?:create|ready|merge)\b/` — the phrase anywhere in the
-command text — and `shellLiveText()` is deleted. The asymmetry is what justifies it: a
-false DENY is friction the user can work around, a false ALLOW is the whole failure
-mode. Pay the friction. Practically: writing about a guarded command inside a Bash call
-gets denied, so split the phrase (`'gh' + ' pr '`, as the test file does) or use Write.
+`shellLiveText()` is deleted. The asymmetry is what justifies it: a false DENY is
+friction the user can work around, a false ALLOW is the whole failure mode. Pay the
+friction. Practically: writing about a guarded command inside a Bash call gets denied, so
+split the phrase (`'gh' + ' pr '`, as the test file does) or use Write.
+
+**Round 4 refined the rule to its final form: complexity is allowed only in the widening
+direction.** Replacing the parser with three *adjacent* bare words was itself too narrow
+and missed five more real invocations — `gh pr \⏎create` (a regression, since the deleted
+parser had flattened backslashes), `gh.exe pr create`, `"gh" pr create`,
+`gh pr "create"`, and `gh -R o/r pr create` (verified against the real binary: `gh` does
+accept `-R` before the subcommand). `GUARDED` now normalizes continuations and quotes and
+tolerates non-separator tokens between `gh`, `pr` and the subcommand. Being intricate to
+*widen* is fine — worst case is a spurious deny; being intricate to *narrow* is what
+caused all five original fail-opens. It is not a shell parser and is not complete, and
+the comment says so rather than claiming otherwise.
 
 Corollary that held up: any Bash-matcher hook you write is evaluated against your own
 tool calls while you develop it.

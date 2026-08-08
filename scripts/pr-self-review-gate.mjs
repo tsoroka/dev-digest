@@ -26,32 +26,60 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 /**
  * Commands the hook refuses to run without a fresh, clean verdict.
  *
- * Deliberately the dumbest possible pattern: the phrase anywhere in the command
- * text, quoted or not. There used to be a `shellLiveText()` pass here that tried
- * to reduce the command to the parts a shell would actually execute, so that
- * `echo "gh pr create"` was allowed while `bash -c "gh pr create"` was denied.
+ * There used to be a `shellLiveText()` pass here that reduced a command to the
+ * parts a shell would actually execute, so `echo "gh pr create"` was allowed
+ * while `bash -c "gh pr create"` was denied. It was deleted: three review rounds
+ * produced five fail-opens and *every one* was in that function — `$(…)` inside
+ * double quotes, `<<<` misread as a heredoc, a quoted `<<` swallowing the rest of
+ * the command, `/bin/sh -c`, `bash --norc -c`. Each fix revealed the next case.
  *
- * It was deleted because it did not work and could not be made to work. Three
- * review rounds produced five fail-opens, and *every one* was in that function:
- * `$(…)` inside double quotes, `<<<` misread as a heredoc, a quoted `<<`
- * swallowing the rest of the command, `/bin/sh -c`, `bash --norc -c`. Each fix
- * revealed the next case. Re-implementing bash's quoting rules is not a thing to
- * do inside a security gate.
+ * The rule that replaced it: **complexity is allowed only in the widening
+ * direction.** The old parser was intricate in order to *narrow* — to let
+ * mentions through — so every bug in it was a fail-open. What is below is
+ * intricate in order to *widen*, and its worst case is a spurious deny. That
+ * asymmetry is the whole design: a false DENY costs the user a workaround, a
+ * false ALLOW costs the gate its reason to exist.
  *
- * The trade is explicit and one-directional: a false DENY on a command that only
- * *mentions* the phrase is friction, and the user can re-run the review or edit
- * the wording. A false ALLOW is the failure this gate exists to prevent. So the
- * matcher over-approximates, and anything that names the command is gated.
+ * So: normalize away the two things that hide a real invocation — line
+ * continuations and quotes — then match `gh … pr … <sub>`, tolerating any
+ * intervening token that is not a command separator. Round 4 found that insisting
+ * on three *adjacent* words missed `gh pr \⏎create`, `gh.exe pr create`,
+ * `"gh" pr create`, `gh pr "create"` and `gh -R o/r pr create` (that last one
+ * verified against the real binary — `gh` does accept `-R` before the subcommand).
  *
- * Practical consequence, worth knowing before it surprises you: writing about
- * these commands inside a Bash call gets denied. Split the phrase — the test
+ * Two things are subtle enough to spell out, because both were review findings:
+ *
+ * 1. **Case-insensitive.** Round 5: `GH pr create` runs on Windows — verified,
+ *    `GH --version` prints the real gh — and this is a Windows repo. A
+ *    case-sensitive match here fails open on every non-lowercase spelling, which
+ *    made the `.exe` branch guard the one platform whose casing it ignored.
+ * 2. **Both normalizations are tested, not one.** Replacing a quote with a *space*
+ *    keeps tokens apart, which is what catches `x"gh" pr create`. But it also
+ *    splits a token that a quote sits inside, which is how `gh pr cre"ate"` and
+ *    `gh p\⏎r create` slipped through. Removing the quote instead closes those
+ *    and breaks the first. Neither normalization dominates, so try both and deny
+ *    if either matches — widening, per the rule above.
+ *
+ * Accepted limit, so nobody trusts this further than it goes: it is not a shell
+ * parser and cannot be. A construct that hides the program name from *both*
+ * normalizations gets through. `$(command -v gh) pr create` is **not** such a case
+ * — the literal `gh` inside satisfies the match. If a real miss turns up, widen
+ * again; never narrow.
+ *
+ * Practical consequence, worth knowing before it surprises you: a Bash call that
+ * merely *writes* about these commands is denied too. Split the phrase — the test
  * file does exactly that — or use the Write tool instead.
  */
-const GUARDED = /gh\s+pr\s+(?:create|ready|merge)\b/;
+const GUARDED = /\bgh(?:\.exe)?\b[^\n;&|]*\bpr\b[^\n;&|]*\b(?:create|ready|merge)\b/i;
 
 /** Does this command line name a guarded `gh pr` subcommand? */
 export function isGuardedCommand(command) {
-  return GUARDED.test(String(command ?? ''));
+  const s = String(command ?? '');
+  // Spacing preserves token boundaries; removing closes tokens a quote or a line
+  // continuation splits. Neither wins outright, so either match is a deny.
+  const spaced = s.replace(/\\\r?\n/g, ' ').replace(/["'`]/g, ' ');
+  const joined = s.replace(/\\\r?\n/g, '').replace(/["'`]/g, '');
+  return GUARDED.test(spaced) || GUARDED.test(joined);
 }
 
 /**
@@ -1344,14 +1372,29 @@ export function isEntrypoint(argv1, moduleUrl) {
   }
 }
 
+/**
+ * Is this process meant to run the gate, rather than import a helper from it?
+ *
+ * `isEntrypoint` is the real answer. The second clause is a backstop for the one
+ * failure that must never happen: a `hook` invocation where the entrypoint check
+ * says no, so nothing prints and exit 0 reads as ALLOW. It also requires the
+ * basename to match — keying off `argv[2]` alone meant any sibling CLI that
+ * imported a helper and happened to be run as `node wrapper.mjs hook` executed
+ * `main()` inside itself, draining that process's stdin and calling `exit(0)`.
+ */
+function shouldRunAsCli() {
+  if (isEntrypoint(process.argv[1], import.meta.url)) return true;
+  if (process.argv[2] !== 'hook') return false;
+  try {
+    return path.basename(process.argv[1] ?? '') === path.basename(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
 // Only run as a CLI. The pure helpers above are exported so
 // `pr-self-review-gate.test.mjs` can pin them without spawning a process.
-//
-// `argv[2] === 'hook'` runs main() even if the entrypoint check somehow says no.
-// A test importing this module never has that argv, and the alternative — a hook
-// that exits 0 without printing a decision — is a silent ALLOW. When the two
-// choices are "maybe run twice" and "maybe never gate", take the first.
-if (isEntrypoint(process.argv[1], import.meta.url) || process.argv[2] === 'hook')
+if (shouldRunAsCli())
   main().catch((err) => {
   // Fail OPEN. A broken gate must never brick the Bash tool — it fails closed
   // only on the three real answers above (missing / stale / blocked verdict).

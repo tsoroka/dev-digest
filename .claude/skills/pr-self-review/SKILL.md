@@ -242,13 +242,16 @@ SUGGESTION. WARNING is the middle: real, worth fixing, not worth blocking on.
 must never brick the Bash tool. `git push` is deliberately not gated; pushing a WIP
 branch is normal work.
 
-The matcher is deliberately blunt: it fires on the phrase **anywhere** in the command,
-quoted or not. It used to try to distinguish running the command from merely naming it,
-and that parser produced five separate fail-opens before it was deleted — the reasoning
-is in `GUARDED`'s comment and in root `LEARNINGS.md`. The consequence you will actually
-hit: **a Bash call that writes or greps the phrase is denied too.** Split it
-(`'gh' + ' pr '`) or use the Write tool. That is the intended trade — a false DENY costs
-a workaround, a false ALLOW costs the entire point of the gate.
+The matcher over-approximates on purpose. It used to try to distinguish running the
+command from merely naming it, and that parser produced five separate fail-opens before
+it was deleted; insisting on three adjacent bare words then missed five more forms. The
+rule that came out of it — **complexity only in the widening direction** — and the known
+limits are in `GUARDED`'s comment and root `LEARNINGS.md`. Read them before touching the
+pattern; it has cost four review rounds. It is not a shell parser and is not complete.
+
+The consequence you will actually hit: **a Bash call that writes or greps the phrase is
+denied too.** Split it (`'gh' + ' pr '`) or use the Write tool. That is the intended
+trade — a false DENY costs a workaround, a false ALLOW costs the entire point of the gate.
 
 ## Tests
 

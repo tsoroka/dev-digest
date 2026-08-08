@@ -13,10 +13,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, symlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   SEVERITIES,
@@ -45,9 +46,17 @@ describe('isGuardedCommand', () => {
   });
 
   it('leaves unrelated commands alone', () => {
-    for (const cmd of ['git status', 'gh pr list', 'gh pr view 3', 'gh repo clone x', '']) {
-      assert.equal(isGuardedCommand(cmd), false, cmd);
-    }
+    const cases = [
+      'git status',
+      'gh pr list',
+      'gh pr view 3',
+      'gh pr checks',
+      'gh pr list --state merged', // `merged` is not `merge` — \b must hold
+      'gh repo clone x',
+      'git push',
+      '',
+    ];
+    for (const cmd of cases) assert.equal(isGuardedCommand(cmd), false, cmd);
   });
 
   it('catches it at every command position', () => {
@@ -68,12 +77,11 @@ describe('isGuardedCommand', () => {
     for (const cmd of cases) assert.equal(isGuardedCommand(cmd), true, cmd);
   });
 
-  it('fires through every form of quoting and indirection', () => {
-    // REGRESSION, all of them. There used to be a `shellLiveText()` pass that
-    // tried to tell "runs it" from "mentions it" by reducing the command to the
-    // parts a shell would execute. Each of these defeated it, and each was a
-    // silent ALLOW on a real invocation. The parser is gone; the phrase is now
-    // matched wherever it appears.
+  it('REGRESSION: forms the deleted shell parser let through', () => {
+    // Every one of these was a silent ALLOW on a real invocation while
+    // `shellLiveText()` existed — it tried to tell "runs it" from "mentions it"
+    // by reducing the command to the parts a shell would execute, and these are
+    // the cases that defeated it. Found by hand in review round 3.
     const cases = [
       `PR_URL="$(${gh}create --fill)"`, // $(…) inside double quotes was blanked
       `url="$(${gh}create)" && echo $url`,
@@ -84,21 +92,63 @@ describe('isGuardedCommand', () => {
       `cat <<<"hello"\n${gh}create`, // <<< read as a heredoc ate the next line
       `echo "a<<b"\n${gh}create`, // a quoted << did the same
       `git commit -m "use a<<b"\n${gh}create`,
-      `bash -c "${gh}create"`,
-      `sh -lc '${gh}create'`,
-      `\`${gh}create\``,
-      `env sh -c '${gh}create'`,
-      `xargs -0 -n1 sh -c '${gh}create'`,
     ];
     for (const cmd of cases) assert.equal(isGuardedCommand(cmd), true, cmd);
   });
 
-  it('gates a bare mention too — the deliberate trade', () => {
+  it('REGRESSION: forms that three adjacent bare words let through', () => {
+    // Round 4. Deleting the parser fixed the cases above but replaced it with a
+    // pattern requiring `gh`, `pr` and the subcommand to be adjacent bare words.
+    // These are all real, working invocations that slipped past it. The first
+    // three are the sharpest lesson: the deleted parser flattened backslashes, so
+    // removing it LOST coverage of line continuations.
+    const cases = [
+      `${gh}\\\ncreate --title x`,
+      `gh \\\npr create`,
+      `gh\\\n pr create`,
+      `gh.exe ${'pr'} create --fill`,
+      `"gh" ${'pr'} create`,
+      `"C:/Program Files/GitHub CLI/gh.exe" ${'pr'} create`,
+      `${gh}"create"`,
+      `${gh}'create'`,
+      `gh -R o/r ${'pr'} create`, // gh really does accept -R before the subcommand
+    ];
+    for (const cmd of cases) assert.equal(isGuardedCommand(cmd), true, cmd);
+  });
+
+  it('REGRESSION: forms a case-sensitive, single-normalization match let through', () => {
+    // Round 5. Windows resolves the executable case-insensitively — `GH --version`
+    // prints the real gh on the dev box — so a case-sensitive pattern fail-opened
+    // on every non-lowercase spelling. Separately, replacing quotes with a space
+    // splits a token the quote sits inside, so the match is now tried against both
+    // a spaced and a joined normalization.
+    const cases = [
+      `GH ${'pr'} create --fill`,
+      `Gh ${'pr'} merge`,
+      `gH ${'pr'} ready`,
+      `GH.exe ${'pr'} create`,
+      `${gh}cre"ate"`, // quote inside the subcommand token
+      `g"h" ${'pr'} create`, // quote inside the program token
+      `gh p\\\nr create`, // continuation inside the `pr` token
+    ];
+    for (const cmd of cases) assert.equal(isGuardedCommand(cmd), true, cmd);
+  });
+
+  it('does not silently pass on a mention — the deliberate trade', () => {
     // Over-approximating is the point: a false DENY is friction, a false ALLOW is
     // the failure the gate exists to prevent. These used to be allowed, and
     // buying that convenience is what cost five fail-opens.
     for (const cmd of [`echo "${gh}create"`, `git commit -m "prep for ${gh}create"`]) {
       assert.equal(isGuardedCommand(cmd), true, cmd);
+    }
+  });
+
+  it('does not let a separator-crossing coincidence trigger it', () => {
+    // The widened pattern tolerates intervening tokens, so make sure it still
+    // stops at a command boundary rather than pairing a `gh pr` in one command
+    // with the word `create` in the next.
+    for (const cmd of ['gh pr list | grep create', 'gh pr view 3; touch create', 'gh pr list && ls create']) {
+      assert.equal(isGuardedCommand(cmd), false, cmd);
     }
   });
 
@@ -357,5 +407,194 @@ describe('dedupe', () => {
     assert.equal(dedupe([f(), f({ category: 'security' })]).length, 2);
     assert.equal(dedupe([f(), f({ start_line: 90, end_line: 90 })]).length, 2);
     assert.equal(dedupe([f(), f({ file: 'b.ts' })]).length, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * The hook, spawned for real.
+ *
+ * Every other case in this file is a pure-function test, and that is exactly how
+ * three rounds of fail-opens stayed green. The round-3 bug was "main() never ran,
+ * the hook printed nothing, exited 0, and silence is ALLOW" — no pure-function
+ * test can see that. This suite runs the script as a process and asserts on
+ * stdout, which is the gate's actual contract.
+ */
+describe('hook (spawned)', () => {
+  const GATE = fileURLToPath(new URL('./pr-self-review-gate.mjs', import.meta.url));
+  const P = 'p' + 'r'; // split, so no line here reads as an invocation
+  const SUB = 'crea' + 'te';
+  const guarded = `gh ${P} ${SUB}`;
+
+  /**
+   * A throwaway repo: one commit on `main`, a topic branch, no verdict.json.
+   *
+   * Every git call is asserted. Without that the suite stays green if the repo
+   * silently stops being a repo-with-history (a global `commit.gpgsign=true` is
+   * enough), and then every case lands on the "no verdict" branch and the setup
+   * becomes decorative.
+   */
+  const scratchRepo = () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'prsr-hook-'));
+    const git = (...args) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+      assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr ?? r.error}`);
+      return r;
+    };
+    git('init', '-b', 'main');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(path.join(dir, 'seed.txt'), 'seed\n');
+    git('add', '-A');
+    git('commit', '-m', 'seed');
+    git('checkout', '-b', 'topic');
+    writeFileSync(path.join(dir, 'work.txt'), 'work\n');
+    assert.match(git('rev-parse', '--abbrev-ref', 'HEAD').stdout, /topic/);
+    return dir;
+  };
+
+  /** `scope` as the gate itself computes it, so a verdict can be made fresh. */
+  const scopeOf = (dir) => {
+    const r = spawnSync(process.execPath, [GATE, 'scope'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    assert.equal(r.status, 0, `scope failed: ${r.stderr ?? r.error}`);
+    return JSON.parse(r.stdout);
+  };
+
+  const writeVerdict = (dir, verdict) => {
+    const p = path.join(dir, '.claude', 'pr-self-review');
+    mkdirSync(p, { recursive: true });
+    writeFileSync(path.join(p, 'verdict.json'), JSON.stringify(verdict, null, 2));
+  };
+
+  const run = (dir, command) =>
+    spawnSync(process.execPath, [GATE, 'hook'], {
+      cwd: dir,
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }),
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+
+  /** Assert a deny, and that it is the deny branch we meant to exercise. */
+  const expectDeny = (res, reason) => {
+    assert.equal(res.status, 0, 'the hook must always exit 0');
+    assert.notEqual(res.stdout.trim(), '', 'silence is ALLOW — it must print a decision');
+    const out = JSON.parse(res.stdout).hookSpecificOutput;
+    assert.equal(out.permissionDecision, 'deny');
+    assert.equal(out.hookEventName, 'PreToolUse');
+    assert.match(out.permissionDecisionReason, reason);
+  };
+
+  it('denies a guarded command when no verdict exists', () => {
+    expectDeny(run(scratchRepo(), guarded), /has not run/i);
+  });
+
+  it('denies when the verdict is for a different change set', () => {
+    const dir = scratchRepo();
+    writeVerdict(dir, { scope_hash: 'deadbeef', verdict: 'approve', file_count: 1 });
+    expectDeny(run(dir, guarded), /stale/i);
+  });
+
+  it('denies when the fresh verdict is request_changes', () => {
+    const dir = scratchRepo();
+    writeVerdict(dir, { scope_hash: scopeOf(dir).scope_hash, verdict: 'request_changes', blockers: 2 });
+    expectDeny(run(dir, guarded), /CRITICAL|blocked/i);
+  });
+
+  it('denies when the verdict is unreadable or its shape is wrong', () => {
+    const dir = scratchRepo();
+    const p = path.join(dir, '.claude', 'pr-self-review');
+    mkdirSync(p, { recursive: true });
+    writeFileSync(path.join(p, 'verdict.json'), '{ not json');
+    expectDeny(run(dir, guarded), /unreadable/i);
+
+    writeVerdict(dir, { scope_hash: scopeOf(dir).scope_hash, verdict: 'looks-fine' });
+    expectDeny(run(dir, guarded), /unrecognised|unrecognized/i);
+  });
+
+  it('ALLOWS silently when the verdict is fresh and not blocking', () => {
+    // The other half of the contract. If this ever denies, the gate has become
+    // unusable rather than unsafe — but it still needs to hold.
+    const dir = scratchRepo();
+    writeVerdict(dir, { scope_hash: scopeOf(dir).scope_hash, verdict: 'approve', blockers: 0 });
+    const res = run(dir, guarded);
+    assert.equal(res.status, 0);
+    assert.equal(res.stdout.trim(), '', 'a fresh clean verdict must not deny');
+  });
+
+  it('stays silent for an unrelated command', () => {
+    const res = run(scratchRepo(), 'git status');
+    assert.equal(res.status, 0);
+    assert.equal(res.stdout.trim(), '');
+  });
+
+  it('REGRESSION: denies every invocation form that has ever fail-opened', () => {
+    // The end-to-end version of the two REGRESSION suites above. Each of these
+    // reached this point as a silent ALLOW at some commit on this branch.
+    const dir = scratchRepo();
+    const forms = [
+      guarded,
+      `PR_URL="$(${guarded} --fill)"`,
+      `/bin/sh -c '${guarded}'`,
+      `bash --norc -c '${guarded}'`,
+      `cat <<<"hello"\n${guarded}`,
+      `gh ${P} \\\n${SUB} --title x`,
+      `gh.exe ${P} ${SUB}`,
+      `"gh" ${P} ${SUB}`,
+      `gh -R o/r ${P} ${SUB}`,
+      `GH ${P} ${SUB} --fill`,
+      `Gh ${P} merge`,
+      `gh ${P} cre"ate"`,
+    ];
+    for (const command of forms) {
+      const res = run(dir, command);
+      assert.notEqual(res.stdout.trim(), '', `silent ALLOW on ${JSON.stringify(command)}`);
+      assert.equal(
+        JSON.parse(res.stdout).hookSpecificOutput.permissionDecision,
+        'deny',
+        JSON.stringify(command),
+      );
+    }
+  });
+
+  it('fails OPEN rather than bricking Bash on junk input or outside a repo', () => {
+    for (const input of ['', '{}', 'not json', '{"tool_name":"Read"}']) {
+      const res = spawnSync(process.execPath, [GATE, 'hook'], {
+        cwd: tmpdir(),
+        input,
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+      assert.equal(res.status, 0, `exit 0 for input ${JSON.stringify(input)}`);
+    }
+    // A guarded command with no computable change set must not wedge the tool.
+    assert.equal(run(tmpdir(), guarded).status, 0);
+  });
+
+  it('REGRESSION: does not hijack a sibling script that imports it and is run as `… hook`', () => {
+    // The backstop clause keyed off argv[2] alone, so any CLI that imported a
+    // helper and was invoked as `node wrapper.mjs hook` ran main() inside itself,
+    // draining that process's stdin and calling exit(0).
+    // The cwd MUST be a real repo and the stdin MUST be a valid guarded payload,
+    // or the hijacked main() takes the silent allow path and this test passes
+    // against the bug it is meant to catch. Verified decisive: with the old guard
+    // the wrapper additionally prints a deny decision.
+    const dir = scratchRepo();
+    const wrapper = path.join(dir, 'wrapper.mjs');
+    writeFileSync(
+      wrapper,
+      `import { isGuardedCommand } from ${JSON.stringify(pathToFileURL(GATE).href)};\n` +
+        `console.log('wrapper-ran', isGuardedCommand('git status'));\n`,
+    );
+    const res = spawnSync(process.execPath, [wrapper, 'hook'], {
+      cwd: dir,
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: guarded } }),
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    assert.equal(res.status, 0);
+    assert.match(res.stdout, /wrapper-ran false/);
+    assert.doesNotMatch(res.stdout, /permissionDecision/);
   });
 });
