@@ -14,9 +14,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const VERDICT_REL = '.claude/pr-self-review/verdict.json';
 const DISMISSED_REL = '.claude/pr-self-review/dismissed.json';
@@ -26,77 +26,32 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 /**
  * Commands the hook refuses to run without a fresh, clean verdict.
  *
- * Anchored to a real command position: start of input, after a separator
- * (`;` `&&` `||` `|` `(` `{` newline), or after a keyword that introduces one
- * (`then` `do` `else` `eval` `time` `exec` `xargs` …), with optional
- * `VAR=value` prefixes. A bare /\bgh pr create\b/ also matches the phrase
- * quoted inside an `echo`, a commit message or a test fixture, and denying
- * those is pure friction: mentioning a command is not running it.
- */
-const GUARDED =
-  /(?:^|[;&|(){}\n]|\b(?:then|do|else|eval|time|command|exec|nohup|xargs|sudo)\b)\s*(?:\w+=\S*\s+)*gh\s+pr\s+(?:create|ready|merge)\b/;
-
-/** A quoted string right after one of these is code about to be executed, not text. */
-const EXEC_TAIL = /(?:^|[;&|(){}\n]|\s)(?:(?:ba|z|k|d)?sh\s+-[a-zA-Z]*c|eval|xargs(?:\s+-[^\s]+)*)\s*$/;
-
-/**
- * Reduce a shell command to the parts that are actually code.
+ * Deliberately the dumbest possible pattern: the phrase anywhere in the command
+ * text, quoted or not. There used to be a `shellLiveText()` pass here that tried
+ * to reduce the command to the parts a shell would actually execute, so that
+ * `echo "gh pr create"` was allowed while `bash -c "gh pr create"` was denied.
  *
- * Two requirements pull in opposite directions: `echo "gh pr create"` must NOT
- * be gated, and `bash -c "gh pr create"` MUST be. Both put the command inside
- * quotes, so quoting alone cannot decide it — what decides it is whether a shell
- * is about to execute that string. Quoted runs are therefore blanked out unless
- * they follow an exec introducer, in which case their contents are spliced back
- * in as live code. Heredoc bodies are always text.
+ * It was deleted because it did not work and could not be made to work. Three
+ * review rounds produced five fail-opens, and *every one* was in that function:
+ * `$(…)` inside double quotes, `<<<` misread as a heredoc, a quoted `<<`
+ * swallowing the rest of the command, `/bin/sh -c`, `bash --norc -c`. Each fix
+ * revealed the next case. Re-implementing bash's quoting rules is not a thing to
+ * do inside a security gate.
+ *
+ * The trade is explicit and one-directional: a false DENY on a command that only
+ * *mentions* the phrase is friction, and the user can re-run the review or edit
+ * the wording. A false ALLOW is the failure this gate exists to prevent. So the
+ * matcher over-approximates, and anything that names the command is gated.
+ *
+ * Practical consequence, worth knowing before it surprises you: writing about
+ * these commands inside a Bash call gets denied. Split the phrase — the test
+ * file does exactly that — or use the Write tool instead.
  */
-export function shellLiveText(command) {
-  const cmd = String(command ?? '');
+const GUARDED = /gh\s+pr\s+(?:create|ready|merge)\b/;
 
-  // Drop heredoc bodies: `cat <<'EOF' … EOF` is data, and a line inside it that
-  // starts with the guarded command used to match on the newline boundary.
-  const lines = cmd.split('\n');
-  const kept = [];
-  let delim = null;
-  for (const line of lines) {
-    if (delim !== null) {
-      if (line.trim() === delim) delim = null;
-      continue;
-    }
-    const h = /<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/.exec(line);
-    kept.push(line);
-    if (h) delim = h[1];
-  }
-
-  let out = '';
-  const text = kept.join('\n');
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '\\') {
-      out += ' ';
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      let end = i + 1;
-      while (end < text.length && text[end] !== ch) {
-        if (text[end] === '\\' && ch !== "'") end++;
-        end++;
-      }
-      const inner = text.slice(i + 1, Math.min(end, text.length));
-      // Backticks are always command substitution; other quotes only when a
-      // shell is being handed them.
-      out += ch === '`' || EXEC_TAIL.test(out) ? `;${inner};` : ' ';
-      i = end;
-      continue;
-    }
-    out += ch;
-  }
-  return out;
-}
-
-/** Does this command line actually invoke a guarded `gh pr` subcommand? */
+/** Does this command line name a guarded `gh pr` subcommand? */
 export function isGuardedCommand(command) {
-  return GUARDED.test(shellLiveText(command));
+  return GUARDED.test(String(command ?? ''));
 }
 
 /**
@@ -1361,12 +1316,42 @@ async function main() {
   process.exit(2);
 }
 
+/**
+ * Is this process running the module as a CLI, rather than importing it?
+ *
+ * `process.argv[1]` is the path as invoked; `import.meta.url` is the realpath
+ * Node resolved. Comparing them raw meant that reaching the script through a
+ * symlink, a Windows junction, or a differently-cased drive letter made them
+ * disagree — `main()` never ran, the hook printed nothing, exited 0, and silence
+ * is ALLOW. So: resolve both to a realpath, and compare case-insensitively on
+ * Windows.
+ */
+export function isEntrypoint(argv1, moduleUrl) {
+  if (!argv1) return false;
+  const norm = (p) => {
+    let out = path.resolve(p);
+    try {
+      out = realpathSync(out);
+    } catch {
+      // Not on disk (or unreadable) — the resolved path is the best we have.
+    }
+    return process.platform === 'win32' ? out.toLowerCase() : out;
+  };
+  try {
+    return norm(argv1) === norm(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
 // Only run as a CLI. The pure helpers above are exported so
 // `pr-self-review-gate.test.mjs` can pin them without spawning a process.
-const invokedDirectly =
-  process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
-
-if (invokedDirectly)
+//
+// `argv[2] === 'hook'` runs main() even if the entrypoint check somehow says no.
+// A test importing this module never has that argv, and the alternative — a hook
+// that exits 0 without printing a decision — is a silent ALLOW. When the two
+// choices are "maybe run twice" and "maybe never gate", take the first.
+if (isEntrypoint(process.argv[1], import.meta.url) || process.argv[2] === 'hook')
   main().catch((err) => {
   // Fail OPEN. A broken gate must never brick the Bash tool — it fails closed
   // only on the three real answers above (missing / stale / blocked verdict).

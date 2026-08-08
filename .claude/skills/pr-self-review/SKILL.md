@@ -236,11 +236,19 @@ SUGGESTION. WARNING is the middle: real, worth fixing, not worth blocking on.
 
 ## The hook
 
-`.claude/settings.json` registers a `PreToolUse` hook that intercepts
-`gh pr create|ready|merge` and denies it when the verdict is missing, stale, or
+`.claude/settings.json` registers a `PreToolUse` hook that intercepts the guarded
+`gh pr` subcommands and denies them when the verdict is missing, stale, or
 `request_changes`. The gate fails **open** on any internal error — a broken script
 must never brick the Bash tool. `git push` is deliberately not gated; pushing a WIP
 branch is normal work.
+
+The matcher is deliberately blunt: it fires on the phrase **anywhere** in the command,
+quoted or not. It used to try to distinguish running the command from merely naming it,
+and that parser produced five separate fail-opens before it was deleted — the reasoning
+is in `GUARDED`'s comment and in root `LEARNINGS.md`. The consequence you will actually
+hit: **a Bash call that writes or greps the phrase is denied too.** Split it
+(`'gh' + ' pr '`) or use the Write tool. That is the intended trade — a false DENY costs
+a workaround, a false ALLOW costs the entire point of the gate.
 
 ## Tests
 

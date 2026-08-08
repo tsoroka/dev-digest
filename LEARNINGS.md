@@ -29,13 +29,31 @@ _Nothing yet._
 
 ## What Doesn't Work
 
+### 2026-08-08 — Don't parse shell text inside a security gate; over-match instead
+Superseded the entry below, which had the lesson backwards. Trying to tell "runs the
+command" from "mentions the command" means re-implementing bash quoting, and three
+review rounds of the `pr-self-review` gate produced **five fail-opens, every single one
+in that function**: `$(…)` inside double quotes, `<<<` misread as a heredoc, a quoted
+`<<` swallowing the rest of the command, `/bin/sh -c`, `bash --norc -c`. Each fix
+revealed the next case; the tests written to pin the previous round passed vacuously.
+
+`GUARDED` is now `/gh\s+pr\s+(?:create|ready|merge)\b/` — the phrase anywhere in the
+command text — and `shellLiveText()` is deleted. The asymmetry is what justifies it: a
+false DENY is friction the user can work around, a false ALLOW is the whole failure
+mode. Pay the friction. Practically: writing about a guarded command inside a Bash call
+gets denied, so split the phrase (`'gh' + ' pr '`, as the test file does) or use Write.
+
+Corollary that held up: any Bash-matcher hook you write is evaluated against your own
+tool calls while you develop it.
+
 ### 2026-08-07 — A PreToolUse Bash matcher on `/\bgh pr create\b/` blocks talking about the command
+**Superseded 2026-08-08 — see above. The fix described here is the one that failed.**
 The `pr-self-review` gate first matched the guarded commands with a bare word-boundary
 regex. It then denied every `echo`, heredoc and test fixture that merely contained the
-string — including the script's own test harness, which could not run. Anchor guarded
-patterns to a shell command boundary instead: `/(?:^|[;&|(\n])\s*(?:\w+=\S*\s+)*gh\s+pr\s+…/`
-(see `GUARDED` in `scripts/pr-self-review-gate.mjs`). Corollary: any Bash-matcher hook
-you write will be evaluated against your own tool calls while you develop it.
+string — including the script's own test harness, which could not run. The conclusion
+drawn at the time was to anchor guarded patterns to a shell command boundary. That
+bought the convenience at the cost of five fail-opens; the friction was the cheaper
+side of the trade all along.
 
 ## Codebase Patterns
 

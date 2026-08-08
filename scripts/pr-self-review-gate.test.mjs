@@ -1,17 +1,22 @@
 /**
  * Tests for the pre-PR gate's pure helpers.
  *
- * Run: `node --test scripts/`  (Node >= 22 — no runner, no new package; the repo
- * is deliberately not a workspace and `scripts/` should not become a fifth one.)
+ * Run: `node --test scripts/pr-self-review-gate.test.mjs`  (Node >= 22 — no runner,
+ * no new package; the repo is deliberately not a workspace and `scripts/` should
+ * not become a fifth one.)
  *
  * Why this file exists: every defect found reviewing this gate was a pure-function
- * behaviour, and one round of fixes introduced two new fail-opens that the next
- * round caught by hand. Those cases are pinned here so the third round doesn't
- * have to. Cases marked REGRESSION are bugs that shipped and were fixed.
+ * behaviour, and each round of fixes introduced new fail-opens that the next round
+ * caught by hand. Those cases are pinned here. Cases marked REGRESSION are bugs
+ * that actually shipped.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   SEVERITIES,
@@ -19,11 +24,11 @@ import {
   expandBraces,
   globToRegex,
   groundFindings,
+  isEntrypoint,
   isGuardedCommand,
   matches,
   normalizeSeverity,
   parseUnifiedDiff,
-  shellLiveText,
   summarize,
 } from './pr-self-review-gate.mjs';
 
@@ -63,22 +68,36 @@ describe('isGuardedCommand', () => {
     for (const cmd of cases) assert.equal(isGuardedCommand(cmd), true, cmd);
   });
 
-  it('does not fire on a mention rather than an invocation', () => {
+  it('fires through every form of quoting and indirection', () => {
+    // REGRESSION, all of them. There used to be a `shellLiveText()` pass that
+    // tried to tell "runs it" from "mentions it" by reducing the command to the
+    // parts a shell would execute. Each of these defeated it, and each was a
+    // silent ALLOW on a real invocation. The parser is gone; the phrase is now
+    // matched wherever it appears.
     const cases = [
-      `echo "${gh}create"`,
-      `echo '${gh}create'`,
-      `echo "cd x && ${gh}create"`, // REGRESSION: the quoted && was read as a boundary
-      `git commit -m "prep for ${gh}create"`,
-      `cat <<'EOF'\n${gh}create\nEOF`, // REGRESSION: heredoc body is data
-      `cat <<EOF\n${gh}create\nEOF`,
+      `PR_URL="$(${gh}create --fill)"`, // $(…) inside double quotes was blanked
+      `url="$(${gh}create)" && echo $url`,
+      `/bin/sh -c '${gh}create'`, // a path-qualified shell missed EXEC_TAIL
+      `/bin/bash -c "${gh}create"`,
+      `bash --norc -c '${gh}create'`, // flags between the shell and -c
+      `bash -o pipefail -c '${gh}create'`,
+      `cat <<<"hello"\n${gh}create`, // <<< read as a heredoc ate the next line
+      `echo "a<<b"\n${gh}create`, // a quoted << did the same
+      `git commit -m "use a<<b"\n${gh}create`,
+      `bash -c "${gh}create"`,
+      `sh -lc '${gh}create'`,
+      `\`${gh}create\``,
+      `env sh -c '${gh}create'`,
+      `xargs -0 -n1 sh -c '${gh}create'`,
     ];
-    for (const cmd of cases) assert.equal(isGuardedCommand(cmd), false, cmd);
+    for (const cmd of cases) assert.equal(isGuardedCommand(cmd), true, cmd);
   });
 
-  it('still fires when a shell is handed the string to execute', () => {
-    // The hard case: `echo "..."` and `bash -c "..."` both quote the command.
-    // What separates them is whether a shell runs it.
-    for (const cmd of [`bash -c "${gh}create"`, `sh -lc '${gh}create'`, `\`${gh}create\``]) {
+  it('gates a bare mention too — the deliberate trade', () => {
+    // Over-approximating is the point: a false DENY is friction, a false ALLOW is
+    // the failure the gate exists to prevent. These used to be allowed, and
+    // buying that convenience is what cost five fail-opens.
+    for (const cmd of [`echo "${gh}create"`, `git commit -m "prep for ${gh}create"`]) {
       assert.equal(isGuardedCommand(cmd), true, cmd);
     }
   });
@@ -90,13 +109,38 @@ describe('isGuardedCommand', () => {
   });
 });
 
-describe('shellLiveText', () => {
-  it('blanks quoted text but keeps structure', () => {
-    assert.match(shellLiveText('echo "hi" && ls'), /&&\s*ls$/);
+describe('isEntrypoint', () => {
+  const here = fileURLToPath(import.meta.url);
+
+  it('recognises the module being run directly', () => {
+    assert.equal(isEntrypoint(here, import.meta.url), true);
   });
-  it('drops only the heredoc body, not the command that opened it', () => {
-    assert.match(shellLiveText("cat <<'EOF'\nbody\nEOF"), /cat/);
-    assert.doesNotMatch(shellLiveText("cat <<'EOF'\nbody\nEOF"), /body/);
+
+  it('recognises it through a relative path and odd separators', () => {
+    const rel = path.relative(process.cwd(), here);
+    assert.equal(isEntrypoint(rel, import.meta.url), true, rel);
+    assert.equal(isEntrypoint(here.replaceAll('\\', '/'), import.meta.url), true);
+  });
+
+  it('recognises it through a symlink', (t) => {
+    // REGRESSION: comparing argv[1] to import.meta.url raw meant a symlinked or
+    // junctioned checkout made them differ, main() never ran, and the hook exited
+    // 0 with no output — a silent ALLOW.
+    const link = path.join(mkdtempSync(path.join(tmpdir(), 'prsr-')), 'link.mjs');
+    try {
+      symlinkSync(here, link);
+    } catch {
+      t.skip('symlinks not permitted in this environment');
+      return;
+    }
+    assert.equal(isEntrypoint(link, import.meta.url), true);
+  });
+
+  it('says no for an unrelated path, and does not throw on junk', () => {
+    assert.equal(isEntrypoint(path.join(path.dirname(here), 'nope.mjs'), import.meta.url), false);
+    for (const v of [null, undefined, '']) assert.equal(isEntrypoint(v, import.meta.url), false);
+    assert.doesNotThrow(() => isEntrypoint(here, 'not-a-url'));
+    assert.equal(isEntrypoint(here, 'not-a-url'), false);
   });
 });
 
